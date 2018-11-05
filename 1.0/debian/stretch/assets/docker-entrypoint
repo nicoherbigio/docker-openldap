@@ -1,0 +1,295 @@
+#!/bin/bash
+set -euo pipefail
+
+: ${KEEP_EXISTING_CONFIG:=false}
+
+#: ${LDAP_ADMIN_PASSWORD:=admin}
+#: ${LDAP_CONFIG_PASSWORD:=config}
+
+: ${LDAP_READONLY_USER:=false}
+#: ${LDAP_READONLY_USER_USERNAME:=readonly}
+#: ${LDAP_READONLY_USER_PASSWORD:=readonly}
+
+: ${LDAP_TLS:=false}
+: ${LDAP_TLS_CRT_FILENAME:=crt.pem}
+: ${LDAP_TLS_KEY_FILENAME:=key.pem}
+: ${LDAP_TLS_CA_CRT_FILENAME:=ca.pem}
+
+: ${LDAP_TLS_ENFORCE:=false}
+: ${LDAP_TLS_CIPHER_SUITE:=SECURE256:+SECURE128:-VERS-TLS-ALL:+VERS-TLS1.2:-RSA:-DHE-DSS:-CAMELLIA-128-CBC:-CAMELLIA-256-CBC}
+: ${LDAP_TLS_VERIFY_CLIENT:=never}
+
+: ${LDAP_BACKEND:=mdb}
+
+: ${LDAP_NOFILE:=1024}
+
+: ${LDAP_LOG_LEVEL:=256}
+
+
+# Reduce maximum number of open file descriptors to 1024 otherwise slapd consumes two orders of magnitude more of RAM.
+# see https://github.com/docker/docker/issues/8231
+ulimit -n ${LDAP_NOFILE}
+
+
+# Create OpenLDAP config and database directory if they do not already exist.
+[ -d /etc/ldap/slapd.d ] || mkdir -p /etc/ldap/slapd.d
+[ -d /var/lib/ldap ] || mkdir -p /var/lib/ldap
+
+
+# Fix OpenLDAP config and database file permissions.
+chown -R ${LDAP_USER}:${LDAP_GROUP} /etc/ldap
+chown -R ${LDAP_USER}:${LDAP_GROUP} /usr/local/etc/ldap
+chown -R ${LDAP_USER}:${LDAP_GROUP} /var/lib/ldap
+
+
+###########################################################
+
+FIRST_START_DONE="/tmp/slapd-first-start-done"
+
+WAS_STARTED_WITH_TLS="/etc/ldap/slapd.d/docker-openldap-was-started-with-tls"
+WAS_STARTED_WITH_TLS_ENFORCE="/etc/ldap/slapd.d/docker-openldap-was-started-with-tls-enforce"
+
+LDAP_TLS_CA_CRT_PATH="/usr/local/etc/ldap/certs/${LDAP_TLS_CA_CRT_FILENAME}"
+LDAP_TLS_CRT_PATH="/usr/local/etc/ldap/certs/${LDAP_TLS_CRT_FILENAME}"
+LDAP_TLS_KEY_PATH="/usr/local/etc/ldap/certs/${LDAP_TLS_KEY_FILENAME}"
+LDAP_TLS_DH_PARAM_PATH="/usr/local/etc/ldap/certs/dhparam.pem"
+
+
+# container first start
+if [ ! -e "${FIRST_START_DONE}" ]; then
+
+    #
+    # Helper functions.
+    #
+
+    function get_ldap_base_dn() {
+        # if LDAP_BASE_DN is empty set value from LDAP_DOMAIN
+        if [ -z "${LDAP_BASE_DN}" ]; then
+            IFS='.' read -ra LDAP_BASE_DN_TABLE <<< "${LDAP_DOMAIN}"
+            for i in "${LDAP_BASE_DN_TABLE[@]}"; do
+                EXT="dc=$i,"
+                LDAP_BASE_DN=${LDAP_BASE_DN}${EXT}
+            done
+            LDAP_BASE_DN=${LDAP_BASE_DN::-1}
+        fi
+    }
+
+    function ldap_add_or_modify() {
+        local LDIF_FILE=$1
+
+        echo "Processing OpenDLAP file ${LDIF_FILE}"
+
+        ldap_ldif_substitutions ${LDIF_FILE}
+
+        if grep -iq changetype ${LDIF_FILE} ; then
+            ldapmodify -Y EXTERNAL -Q -H ldapi:/// -f ${LDIF_FILE} 2>&1 | echo || ldapmodify -h localhost -p 389 -D cn=admin,${LDAP_BASE_DN} -w "${LDAP_ADMIN_PASSWORD}" -f ${LDIF_FILE} 2>&1 | echo
+        else
+            ldapadd -Y EXTERNAL -Q -H ldapi:/// -f ${LDIF_FILE} 2>&1 | echo || ldapadd -h localhost -p 389 -D cn=admin,${LDAP_BASE_DN} -w "${LDAP_ADMIN_PASSWORD}" -f ${LDIF_FILE} 2>&1 | echo
+        fi
+    }
+
+    function ldap_ldif_substitutions() {
+        local LDIF_FILE=$1
+        echo "Processing LDIF substitutions of OpenLDAP file ${LDIF_FILE}"
+
+        sed -i "s|{{ LDAP_BASE_DN }}|${LDAP_BASE_DN}|g" ${LDIF_FILE}
+        sed -i "s|{{ LDAP_BACKEND }}|${LDAP_BACKEND}|g" ${LDIF_FILE}
+
+        LDAP_CONFIG_PASSWORD_ENCRYPTED=$(slappasswd -s "$LDAP_CONFIG_PASSWORD")
+        sed -i "s|{{ LDAP_CONFIG_PASSWORD_ENCRYPTED }}|${LDAP_CONFIG_PASSWORD_ENCRYPTED}|g" ${LDIF_FILE}
+
+        if [ "${LDAP_READONLY_USER,,}" == "true" ]; then
+            LDAP_READONLY_USER_PASSWORD_ENCRYPTED=$(slappasswd -s ${LDAP_READONLY_USER_PASSWORD})
+
+            sed -i "s|{{ LDAP_READONLY_USER_USERNAME }}|${LDAP_READONLY_USER_USERNAME}|g" ${LDIF_FILE}
+            sed -i "s|{{ LDAP_READONLY_USER_PASSWORD_ENCRYPTED }}|${LDAP_READONLY_USER_PASSWORD_ENCRYPTED}|g" ${LDIF_FILE}
+        fi
+
+        if [ "${LDAP_TLS,,}" == "true" ]; then
+            sed -i "s|{{ LDAP_TLS_CA_CRT_PATH }}|${LDAP_TLS_CA_CRT_PATH}|g" ${LDIF_FILE}
+            sed -i "s|{{ LDAP_TLS_CRT_PATH }}|${LDAP_TLS_CRT_PATH}|g" ${LDIF_FILE}
+            sed -i "s|{{ LDAP_TLS_KEY_PATH }}|${LDAP_TLS_KEY_PATH}|g" ${LDIF_FILE}
+            sed -i "s|{{ LDAP_TLS_DH_PARAM_PATH }}|${LDAP_TLS_DH_PARAM_PATH}|g" ${LDIF_FILE}
+
+            sed -i "s|{{ LDAP_TLS_CIPHER_SUITE }}|${LDAP_TLS_CIPHER_SUITE}|g" ${LDIF_FILE}
+            sed -i "s|{{ LDAP_TLS_VERIFY_CLIENT }}|${LDAP_TLS_VERIFY_CLIENT}|g" ${LDIF_FILE}
+        fi
+    }
+
+    #
+    # Global variables
+    #
+    BOOTSTRAP=false
+
+    get_ldap_base_dn
+
+    #
+    # Check if OpenLDAP config and database directory are both empty.
+    #
+    # If this is the case, perform the first part of the setup to create a fresh OpenLDAP instance,
+    # otherwise cancel the setup and throw corresponding error messages if one of the directory is not empty or
+    # use the present OpenLDAP config and database.
+    #
+    if [ -z "$(ls -A /etc/ldap/slapd.d)" ] && [ -z "$(ls -A /var/lib/ldap)" ]; then
+        BOOTSTRAP=true
+
+        echo "OpenLDAP config and database directory are empty ..."
+        echo "Start init of new OpenLDAP server ..."
+
+        echo -e "slapd slapd/internal/generated_adminpw password ${LDAP_ADMIN_PASSWORD}" | debconf-set-selections
+        echo -e "slapd slapd/internal/adminpw password ${LDAP_ADMIN_PASSWORD}" | debconf-set-selections
+        echo -e "slapd slapd/password2 password ${LDAP_ADMIN_PASSWORD}" | debconf-set-selections
+        echo -e "slapd slapd/password1 password ${LDAP_ADMIN_PASSWORD}" | debconf-set-selections
+        echo -e "slapd slapd/dump_database_destdir string /var/backups/slapd-VERSION" | debconf-set-selections
+        echo -e "slapd slapd/domain string ${LDAP_DOMAIN}" | debconf-set-selections
+        echo -e "slapd shared/organization string ${LDAP_ORGANISATION}" | debconf-set-selections
+        echo -e "slapd slapd/backend string ${LDAP_BACKEND^^}" | debconf-set-selections
+        echo -e "slapd slapd/purge_database boolean true" | debconf-set-selections
+        echo -e "slapd slapd/move_old_database boolean true" | debconf-set-selections
+        echo -e "slapd slapd/allow_ldap_v2 boolean false" | debconf-set-selections
+        echo -e "slapd slapd/no_configuration boolean false" | debconf-set-selections
+        echo -e "slapd slapd/dump_database select when needed" | debconf-set-selections
+
+        dpkg-reconfigure -f noninteractive slapd
+
+    #
+    # Error: The OpenLDAP config directory (/etc/ldap/slapd.d) is empty but not the database directory (/var/lib/ldap).
+    #
+    elif [ -z "$(ls -A /etc/ldap/slapd.d)" ] && [ ! -z "$(ls -A /var/lib/ldap)" ]; then
+        echo "Error: The OpenLDAP config directory (/etc/ldap/slapd.d) is empty but not the database directory (/var/lib/ldap)."
+        exit 1
+
+    #
+    # Error: The OpenLDAP database directory (/var/lib/ldap) is empty but not the config directory (/etc/ldap/slapd.d)
+    #
+    elif [ ! -z "$(ls -A /etc/ldap/slapd.d)" ] && [ -z "$(ls -A /var/lib/ldap)" ]; then
+        lecho "Error: The OpenLDAP database directory (/var/lib/ldap) is empty but not the config directory (/etc/ldap/slapd.d)."
+        exit 1
+
+    #
+    # We have a present OpenLDAP config and database directory.
+    #
+    else
+        echo "OpenLDAP config and database directory are not empty ..."
+        echo "Start init of present OpenLDAP server ..."
+
+    fi
+
+    #
+    # Check if existing OpenLDAP config should be kept.
+    #
+    # If this is NOT the case, perform the second part of the setup,
+    # otherwise do noting and keep the config as it is.
+    #
+    if [ "${KEEP_EXISTING_CONFIG,,}" != "true" ]; then
+
+        #
+        # Start OpenLDAP server
+        #
+        echo "Start OpenLDAP server ..."
+
+        /usr/sbin/slapd -h "ldap:/// ldapi:///" -u ${LDAP_USER} -g ${LDAP_GROUP} -d ${LDAP_LOG_LEVEL} 2>&1 &
+
+        echo "Waiting for OpenLDAP server to start ..."
+        while [ ! -e /run/slapd/slapd.pid ]; do sleep 0.1; done
+
+
+        #
+        # Bootstrap config
+        #
+        if [ "${BOOTSTRAP,,}" == "true" ]; then
+            echo "Add OpenLDAP Bootstrap config ..."
+
+            #ldap_add_or_modify "/etc/ldap/schema/ppolicy.ldif"
+
+            # process config files (*.ldif) in bootstrap directory (do no process files in subdirectories)
+            for f in $(find /usr/local/etc/ldap/ldif/bootstrap -mindepth 1 -maxdepth 1 -type f -name \*.ldif | sort); do
+                ldap_add_or_modify "$f"
+            done
+
+            # read only user
+            if [ "${LDAP_READONLY_USER,,}" == "true" ]; then
+                for f in $(find /usr/local/etc/ldap/ldif/bootstrap/readonly-user -mindepth 1 -maxdepth 1 -type f -name \*.ldif | sort); do
+                    ldap_add_or_modify "$f"
+                done
+            fi
+
+        fi
+
+        #
+        # TLS config
+        #
+        if [ -e "${WAS_STARTED_WITH_TLS}" ] && [ "${LDAP_TLS,,}" != "true" ]; then
+            echo "!!! WARNING: LDAP_TLS=false but the container was previously started with LDAP_TLS=true"
+            echo "TLS can't be disabled once added. Ignoring LDAP_TLS=false."
+            LDAP_TLS=true
+        fi
+
+        if [ -e "${WAS_STARTED_WITH_TLS_ENFORCE}" ] && [ "${LDAP_TLS_ENFORCE,,}" != "true" ]; then
+            echo "!!! WARNING: LDAP_TLS_ENFORCE=false but the container was previously started with LDAP_TLS_ENFORCE=true"
+            echo "TLS enforcing can't be disabled once added. Ignoring LDAP_TLS_ENFORCE=false."
+            LDAP_TLS_ENFORCE=true
+        fi
+
+        if [ "${LDAP_TLS,,}" == "true" ]; then
+            echo "Add OpenLDAP TLS config ..."
+
+            # generate a certificate and key with ssl-helper tool if LDAP_CRT and LDAP_KEY files don't exists
+            # https://github.com/osixia/docker-light-baseimage/blob/stable/image/service-available/:ssl-tools/assets/tool/ssl-helper
+            #ssl-helper $LDAP_SSL_HELPER_PREFIX $LDAP_TLS_CRT_PATH $LDAP_TLS_KEY_PATH $LDAP_TLS_CA_CRT_PATH
+
+            # create DHParamFile if not found
+            [ -f ${LDAP_TLS_DH_PARAM_PATH} ] || openssl dhparam -out ${LDAP_TLS_DH_PARAM_PATH} 2048
+            chmod 600 ${LDAP_TLS_DH_PARAM_PATH}
+
+            chown -R ${LDAP_USER}:${LDAP_GROUP} /usr/local/etc/ldap/certs
+            chmod 600 ${LDAP_TLS_KEY_PATH}
+
+            ldap_add_or_modify "/usr/local/etc/ldap/ldif/tls/tls-enable.ldif"
+            touch ${WAS_STARTED_WITH_TLS}
+
+            # enforce TLS
+            if [ "${LDAP_TLS_ENFORCE,,}" == "true" ]; then
+                echo "Add OpenLDAP enforce TLS config ..."
+
+                ldap_add_or_modify "/usr/local/etc/ldap/ldif/tls/tls-enforce-enable.ldif"
+                touch ${WAS_STARTED_WITH_TLS_ENFORCE}
+            fi
+        fi
+
+        #
+        # Stop OpenLDAP server
+        #
+        echo "Stop OpenLDAP server  ..."
+
+        SLAPD_PID=$(cat /run/slapd/slapd.pid)
+        kill -15 ${SLAPD_PID}
+
+        while [ -e /proc/${SLAPD_PID} ]; do sleep 0.1; done # wait until slapd is terminated
+
+    else
+        echo "!!! KEEP_EXISTING_CONFIG = true The OpenLDAP configuration will not be updated."
+
+    fi
+
+    #
+    # OpenLDAP client config
+    #
+    if [ "${LDAP_TLS,,}" == "true" ]; then
+        echo "Configure OpenLDAP client TLS config ..."
+
+        sed -i --follow-symlinks "s,TLS_CACERT.*,TLS_CACERT ${LDAP_TLS_CA_CRT_PATH},g" /etc/ldap/ldap.conf
+        echo "TLS_REQCERT ${LDAP_TLS_VERIFY_CLIENT}" >> /etc/ldap/ldap.conf
+
+        [[ -f "$HOME/.ldaprc" ]] && rm -f $HOME/.ldaprc
+        echo "TLS_CERT ${LDAP_TLS_CRT_PATH}" > $HOME/.ldaprc
+        echo "TLS_KEY ${LDAP_TLS_KEY_PATH}" >> $HOME/.ldaprc
+    fi
+
+    echo "Init of OpenLDAP server is done ..."
+    touch ${FIRST_START_DONE}
+fi
+
+###########################################################
+
+exec /usr/sbin/slapd -h "ldap:/// ldaps:/// ldapi:///" -u ${LDAP_USER} -g ${LDAP_GROUP} -d ${LDAP_LOG_LEVEL}
