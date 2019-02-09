@@ -18,7 +18,7 @@ RUN set -ex \
 
 RUN set -ex \
     && apt-get update \
-    && apt-get install -y --no-install-recommends gnutls-bin ldap-utils openssl slapd ssl-cert \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gnutls-bin ldap-utils openssl slapd ssl-cert \
     && rm -rf /etc/ldap/slapd.d /var/lib/ldap \
     && rm -rf /var/lib/apt/lists/*
 
