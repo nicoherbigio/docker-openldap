@@ -1,4 +1,4 @@
-FROM nicoherbigio/debian:stretch-slim
+FROM nicoherbigio/debian:buster-slim
 
 LABEL maintainer="Nico Herbig <nico@nicoherbig.io>"
 
