@@ -11,7 +11,9 @@ env:
   DOCKER_IMAGE_CONTEXT_PATH: 1.0/debian/default/
   DOCKERHUB_IMAGE_TAGS: |
     nicoherbigde/openldap:1.0
+    nicoherbigio/openldap:1.0
     nicoherbigde/openldap:1.0.0
+    nicoherbigio/openldap:1.0.0
 
 jobs:
   build-and-push:
