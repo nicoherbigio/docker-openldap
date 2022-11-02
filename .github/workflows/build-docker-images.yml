@@ -24,9 +24,7 @@ jobs:
             docker-context: 1.0/debian/default
             docker-tags: |
               nicoherbigde/openldap:1.0
-              nicoherbigio/openldap:1.0
               nicoherbigde/openldap:1.0.0
-              nicoherbigio/openldap:1.0.0
 
     steps:
       - name: Checkout Git Repository
