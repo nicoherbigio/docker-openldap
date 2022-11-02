@@ -18,13 +18,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [1.0]
+        version: [1.0-bullseye]
         include:
-          - version: 1.0
+          - version: 1.0-bullseye
             docker-context: 1.0/debian/default
             docker-tags: |
               nicoherbigde/openldap:1.0
+              nicoherbigde/openldap:1.0-bullseye
               nicoherbigde/openldap:1.0.0
+              nicoherbigde/openldap:1.0.0-bullseye
 
     steps:
       - name: Checkout Git Repository
