@@ -4,7 +4,7 @@
 
 ## Supported tags and respective `Dockerfile` links
 
- * [`1.0`, `1.0.0` (1.0/debian/default/Dockerfile)](https://github.com/nicoherbigio/docker-openldap/blob/main/1.0/debian/default/Dockerfile)
+ * [`1.0`, `1.0.0`](https://github.com/nicoherbigio/docker-openldap/blob/main/1.0/debian/default/Dockerfile)
 
 ## How to get this image
 
