@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - '.github/**'
+      - '.github/workflows/**'
       - '1.0/**'
   schedule:
     - cron: '0 1 * * 6'
